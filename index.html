@@ -89,6 +89,21 @@
   .app span{font-weight:700;font-size:12px;text-align:center}
   .app textarea{min-height:74px;font-size:13px}
 
+  /* Attachments */
+  .ahint{font-size:12px;color:var(--hint);font-weight:600;margin:0 0 10px}
+  .addbtn{display:inline-block;background:#fff;border:1px solid var(--border);
+    border-radius:9px;padding:12px 18px;font-weight:700;cursor:pointer;font-size:15px}
+  .addbtn:active{transform:translateY(1px)}
+  .attlist{margin-top:12px;display:flex;flex-direction:column;gap:6px}
+  .attitem{display:flex;align-items:center;gap:10px;background:rgba(255,255,255,.18);
+    border:1px solid var(--gold-deep);border-radius:8px;padding:8px 10px;font-size:13px}
+  .attitem .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+  .attitem .sz{opacity:.85;font-size:12px;flex:none}
+  .attitem button{background:var(--red);color:#fff;border:none;border-radius:6px;
+    padding:6px 10px;font-weight:700;cursor:pointer;font-size:12px;flex:none}
+  .atttotal{margin-top:8px;font-size:12px;font-weight:700;color:var(--hint)}
+  .atttotal.warn{color:var(--red)}
+
   /* Submit bar */
   .bar{position:fixed;left:0;right:0;bottom:0;background:rgba(28,20,8,.95);
     backdrop-filter:blur(4px);padding:12px 16px;display:flex;justify-content:flex-end;
@@ -185,6 +200,16 @@
   </fieldset>
 
   <fieldset>
+    <legend>Photos &amp; Attachments</legend>
+    <p class="ahint">Add scene photos or documents. Photos are automatically shrunk so the email stays under the size limit.</p>
+    <label class="addbtn">+ Add files / photos
+      <input type="file" id="files" multiple style="display:none">
+    </label>
+    <div id="attlist" class="attlist"></div>
+    <div id="atttotal" class="atttotal"></div>
+  </fieldset>
+
+  <fieldset>
     <legend>Sign-off</legend>
     <div class="row two">
       <label class="field"><span>Member Completing Report</span><input type="text" id="member_completing"></label>
@@ -261,6 +286,67 @@ document.querySelectorAll('.chk').forEach(chip=>{
   cb.addEventListener('change',sync); sync();
 });
 
+// ---- Attachments ----------------------------------------------------------
+const MAX_TOTAL_MB = 18;            // raw cap; leaves headroom under Gmail's 25MB
+let attachments = [];
+const filesInput = document.getElementById('files');
+const attlist = document.getElementById('attlist');
+const atttotal = document.getElementById('atttotal');
+
+function b64bytes(b64){ return Math.floor(b64.length * 0.75); }
+function human(n){ return n>=1048576 ? (n/1048576).toFixed(1)+' MB' : Math.max(1,Math.ceil(n/1024))+' KB'; }
+
+function attTotalBytes(){ return attachments.reduce((s,a)=>s+b64bytes(a.b64),0); }
+
+function renderAtt(){
+  attlist.innerHTML='';
+  attachments.forEach((a,i)=>{
+    const d=document.createElement('div'); d.className='attitem';
+    d.innerHTML='<span class="nm"></span><span class="sz">'+human(b64bytes(a.b64))+'</span><button type="button">Remove</button>';
+    d.querySelector('.nm').textContent=a.name;
+    d.querySelector('button').onclick=()=>{ attachments.splice(i,1); renderAtt(); };
+    attlist.appendChild(d);
+  });
+  const total=attTotalBytes();
+  if(attachments.length){
+    atttotal.textContent='Attached: '+attachments.length+' file'+(attachments.length>1?'s':'')+' · '+human(total);
+    atttotal.className='atttotal'+(total>MAX_TOTAL_MB*1048576?' warn':'');
+  } else { atttotal.textContent=''; atttotal.className='atttotal'; }
+}
+
+function readRaw(file){
+  return new Promise(res=>{
+    const r=new FileReader();
+    r.onload=()=>res({name:file.name, type:file.type||'application/octet-stream', b64:(r.result+'').split(',')[1]});
+    r.readAsDataURL(file);
+  });
+}
+function shrinkImg(file){
+  return new Promise(res=>{
+    const url=URL.createObjectURL(file); const img=new Image();
+    img.onload=()=>{
+      const max=1600; let w=img.naturalWidth, h=img.naturalHeight;
+      if(w>max||h>max){ const s=Math.min(max/w,max/h); w=Math.round(w*s); h=Math.round(h*s); }
+      const cv=document.createElement('canvas'); cv.width=w; cv.height=h;
+      cv.getContext('2d').drawImage(img,0,0,w,h);
+      URL.revokeObjectURL(url);
+      const du=cv.toDataURL('image/jpeg',0.72);
+      res({name:file.name.replace(/\.[^.]+$/,'')+'.jpg', type:'image/jpeg', b64:du.split(',')[1]});
+    };
+    img.onerror=()=>{ URL.revokeObjectURL(url); readRaw(file).then(res); };
+    img.src=url;
+  });
+}
+filesInput.addEventListener('change', async (e)=>{
+  const list=[...e.target.files];
+  for(const f of list){
+    const item = f.type.startsWith('image/') ? await shrinkImg(f) : await readRaw(f);
+    attachments.push(item);
+  }
+  filesInput.value='';
+  renderAtt();
+});
+
 function fmtDate(v){ // yyyy-mm-dd -> mm/dd/yyyy
   if(!v) return "";
   const m=v.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -299,7 +385,8 @@ function summary(){
   return "Date: "+(fmtDate(val('date'))||"—")+"\n"+
          "Incident Address: "+(val('incident_address')||"—")+"\n"+
          "Type(s): "+(types.join(", ")||"—")+"\n"+
-         "Completed by: "+(val('member_completing')||"—");
+         "Completed by: "+(val('member_completing')||"—")+"\n"+
+         "Attachments: "+attachments.length;
 }
 
 const status=document.getElementById('status');
@@ -324,11 +411,18 @@ document.getElementById('send').addEventListener('click', async ()=>{
   btn.disabled=true; setStatus("Building report…","");
   try{
     const bytes=await buildPdf();
+    const grandTotal = bytes.length + attTotalBytes();
+    if(grandTotal > MAX_TOTAL_MB*1048576){
+      btn.disabled=false;
+      setStatus("Too large to email ("+human(grandTotal)+"). Remove some attachments — limit is about "+MAX_TOTAL_MB+" MB.","err");
+      return;
+    }
     let bin=""; const chunk=8192;
     for(let i=0;i<bytes.length;i+=chunk){ bin+=String.fromCharCode.apply(null, bytes.subarray(i,i+chunk)); }
     const payload=JSON.stringify({
       filename:fileName(), date:fmtDate(val('date')),
-      summary:summary(), pdfBase64:btoa(bin)
+      summary:summary(), pdfBase64:btoa(bin),
+      attachments: attachments
     });
     setStatus("Sending…","");
 
